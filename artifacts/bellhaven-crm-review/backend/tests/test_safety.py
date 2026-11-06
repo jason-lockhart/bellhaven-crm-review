@@ -403,3 +403,18 @@ class AdditionalRegressionTests(DatabaseTest):
         self.assertEqual(self.apply(fake,p),'facility')
         self.assertEqual(fake.creates,0)
         self.assertEqual(fake.updates,[])
+
+
+class BrowserScanContractTests(DatabaseTest):
+    def test_scan_button_json_request_reaches_pipeline_without_crm_writes(self):
+        with patch.object(review.pipeline, 'run_reconciliation', return_value={'status': 'completed'}) as scan, patch.object(review, 'CRMClient') as crm:
+            response = self.browser.post(review.API_PREFIX + '/run', data='{}', content_type='application/json', headers={'Origin': 'http://localhost'})
+        self.assertEqual(response.status_code, 200)
+        scan.assert_called_once_with()
+        crm.assert_not_called()
+
+    def test_bodyless_generated_request_is_rejected_before_scan(self):
+        with patch.object(review.pipeline, 'run_reconciliation') as scan:
+            response = self.browser.post(review.API_PREFIX + '/run')
+        self.assertEqual(response.status_code, 415)
+        scan.assert_not_called()
