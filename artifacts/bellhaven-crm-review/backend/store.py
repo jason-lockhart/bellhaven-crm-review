@@ -49,6 +49,13 @@ def initialize() -> None:
                 crm_write_error TEXT,
                 crm_result_account_id TEXT
             );
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proposal_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                detail TEXT,
+                recorded_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS app_metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -95,13 +102,30 @@ def upsert_proposals(proposals: list[dict]) -> tuple[int, int]:
     existing = 0
     now = utc_now()
     with connect() as connection:
+        # Only undecided, unstarted proposals may be superseded. Decisions remain immutable.
+        active_ids = {p["id"] for p in proposals}
+        for row in connection.execute("SELECT id FROM proposals WHERE status = 'pending' AND crm_write_status = 'not_started'").fetchall():
+            if row["id"] not in active_ids:
+                connection.execute("UPDATE proposals SET status = 'superseded' WHERE id = ?", (row["id"],))
         for proposal in proposals:
+            # Legacy decisions used an action-only hash. Keep their decisions even
+            # when the newer matcher attaches a richer fact fingerprint.
+            historical = connection.execute("SELECT payload_json FROM proposals WHERE status IN ('approved', 'rejected')").fetchall()
+            def same_legacy_action(old):
+                return (not old.get("matcher_version") and old.get("type") == proposal.get("type")
+                    and (old.get("account") or {}).get("id") == (proposal.get("account") or {}).get("id")
+                    and (old.get("community") or {}).get("slug") == (proposal.get("community") or {}).get("slug")
+                    and old.get("changes") == proposal.get("changes"))
+            if any(same_legacy_action(json.loads(row["payload_json"])) for row in historical):
+                existing += 1
+                continue
             proposal["created_at"] = now
             cursor = connection.execute(
                 """
                 INSERT INTO proposals (id, type, status, payload_json, created_at)
                 VALUES (?, ?, 'pending', ?, ?)
-                ON CONFLICT(id) DO NOTHING
+                ON CONFLICT(id) DO UPDATE SET status = 'pending', payload_json = excluded.payload_json
+                WHERE proposals.status = 'superseded' AND proposals.crm_write_status = 'not_started'
                 """,
                 (
                     proposal["id"],
@@ -192,6 +216,8 @@ def set_decision(
         ).fetchone()
         if not current:
             return None
+        connection.execute("INSERT INTO audit_events (proposal_id, event, detail, recorded_at) VALUES (?, ?, ?, ?)",
+                           (proposal_id, decision, reviewer_notes, decided_at))
         next_write_status = write_status or current["crm_write_status"]
         next_error = write_error
         if write_status is None and decision == current["status"]:
@@ -231,6 +257,8 @@ def set_write_status(
     result_account_id: str | None = None,
 ) -> dict | None:
     with connect() as connection:
+        connection.execute("INSERT INTO audit_events (proposal_id, event, detail, recorded_at) VALUES (?, ?, ?, ?)",
+                           (proposal_id, status, error, utc_now()))
         connection.execute(
             """
             UPDATE proposals
@@ -278,7 +306,7 @@ def recent_activity(limit: int = 30) -> list[dict]:
     with connect() as connection:
         rows = connection.execute(
             """
-            SELECT id, type, status, payload_json, reviewer_notes, decided_at
+            SELECT id, type, status, payload_json, reviewer_notes, decided_at, crm_write_status
             FROM proposals
             WHERE status IN ('approved', 'rejected') AND decided_at IS NOT NULL
             ORDER BY decided_at DESC
@@ -300,3 +328,32 @@ def recent_activity(limit: int = 30) -> list[dict]:
             }
         )
     return activity
+
+
+def claim_approval(proposal_id: str, notes: str | None) -> bool:
+    """Atomic claim across workers. Interrupted writes require explicit investigation."""
+    with connect() as connection:
+        cursor = connection.execute("""
+            UPDATE proposals SET status = 'approved', reviewer_notes = COALESCE(?, reviewer_notes),
+              decided_at = COALESCE(decided_at, ?), crm_write_status = 'applying'
+            WHERE id = ? AND status IN ('pending', 'approved')
+              AND crm_write_status NOT IN ('applying', 'applied')
+              AND NOT EXISTS (SELECT 1 FROM proposals WHERE crm_write_status = 'applying')
+        """, (notes, utc_now(), proposal_id))
+        if cursor.rowcount:
+            connection.execute("INSERT INTO audit_events (proposal_id, event, detail, recorded_at) VALUES (?, 'approved', ?, ?)",
+                               (proposal_id, notes, utc_now()))
+        return cursor.rowcount == 1
+
+
+def record_rejection(proposal_id: str, notes: str | None) -> bool:
+    with connect() as connection:
+        cursor = connection.execute("""
+            UPDATE proposals SET status = 'rejected', reviewer_notes = ?, decided_at = ?,
+              crm_write_status = 'not_applicable'
+            WHERE id = ? AND status = 'pending' AND crm_write_status = 'not_started'
+        """, (notes, utc_now(), proposal_id))
+        if cursor.rowcount:
+            connection.execute("INSERT INTO audit_events (proposal_id, event, detail, recorded_at) VALUES (?, 'rejected', ?, ?)",
+                               (proposal_id, notes, utc_now()))
+        return cursor.rowcount == 1

@@ -4,6 +4,11 @@ import hashlib
 import json
 import re
 import unicodedata
+import math
+
+from .crm_client import normalize_account_record
+
+MATCHER_VERSION = 2
 from difflib import SequenceMatcher
 
 LEGAL_SUFFIXES = {"inc", "llc", "ltd", "limited", "corp", "corporation", "company", "co"}
@@ -19,6 +24,7 @@ ADDRESS_WORDS = {
     "parkway": "pkwy",
     "place": "pl",
     "terrace": "ter",
+    "north": "n", "south": "s", "east": "e", "west": "w",
 }
 
 
@@ -67,7 +73,7 @@ def score_account(community: dict, account: dict) -> tuple[float, list[str]]:
     website_zip = re.sub(r"\D", "", str(community.get("zip") or ""))
     account_zip = re.sub(r"\D", "", _text(account, "zip"))
     if website_zip and account_zip:
-        score = 1.0 if website_zip == account_zip else 0.0
+        score = 1.0 if website_zip[:5] == account_zip[:5] else 0.0
         weights.append((0.18, score))
         evidence.append("ZIP code matches." if score else "ZIP code differs.")
     else:
@@ -104,19 +110,50 @@ def score_account(community: dict, account: dict) -> tuple[float, list[str]]:
 
     # Missing fields reduce confidence instead of silently reweighting a name-only match.
     confidence = sum(weight * score for weight, score in weights)
+    # A complete physical address is stronger than a legacy/rebranded name.
+    same_street = bool(website_street and website_street == account_street)
+    same_locality = bool(website_city and website_city == account_city and website_state == account_state)
+    if same_street and same_locality:
+        confidence = max(confidence, 0.90 + 0.10 * name_score)
+    elif website_street and account_street:
+        left_number = re.match(r"^\d+", website_street)
+        right_number = re.match(r"^\d+", account_street)
+        if left_number and right_number and left_number[0] != right_number[0]:
+            confidence = min(confidence, 0.70)
+    if not website_street or not account_street:
+        confidence = min(confidence, 0.77)
+    if website_city and account_city and website_city != account_city:
+        confidence = min(confidence, 0.77)
+    if website_state and account_state and website_state != account_state:
+        confidence = min(confidence, 0.70)
     return round(confidence, 4), evidence
 
 
-def _number(value: object) -> float:
+def parse_financial_value(value: object) -> float:
+    if value is None or isinstance(value, bool) or str(value).strip() == "":
+        raise ValueError("Financial data is missing; investigate before changing ownership.")
     try:
-        return float(value or 0)
+        result = float(value)
     except (TypeError, ValueError):
-        return 0.0
+        raise ValueError("Financial data is unparseable; investigate before changing ownership.") from None
+    if not math.isfinite(result) or result < 0:
+        raise ValueError("Financial data is invalid; investigate before changing ownership.")
+    return result
+
+
+def identify_parent(accounts: list[dict]) -> dict | None:
+    candidates = [a for a in accounts if not a.get("parent_id")
+                  and not a.get("duplicate_of_account") and a.get("status") != "Inactive"
+                  and normalize_name(a.get("name")) in {
+                      "bellhaven senior living", "bellhaven senior living parent account"}]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def requires_successor_account(account: dict) -> bool:
     """Apply the assessment's two-condition change-of-ownership rule."""
-    return _number(account.get("lifetime_revenue")) > 0 and _number(account.get("outstanding_ar")) > 0
+    revenue = parse_financial_value(account.get("lifetime_revenue"))
+    ar = parse_financial_value(account.get("outstanding_ar"))
+    return revenue > 0 and ar > 0
 
 
 def snapshot_account(account: dict, account_by_id: dict[str, dict]) -> dict:
@@ -133,8 +170,8 @@ def snapshot_account(account: dict, account_by_id: dict[str, dict]) -> dict:
         "zip": str(account.get("zip") or ""),
         "parent_id": parent_id,
         "parent_name": str(parent.get("name")) if parent and parent.get("name") else None,
-        "lifetime_revenue": _number(account.get("lifetime_revenue")),
-        "outstanding_ar": _number(account.get("outstanding_ar")),
+        "lifetime_revenue": account.get("lifetime_revenue"),
+        "outstanding_ar": account.get("outstanding_ar"),
         "chow_current_account": (
             str(account.get("chow_current_account"))
             if account.get("chow_current_account") is not None
@@ -166,6 +203,7 @@ def _proposal(
         "slug": community.get("slug") if community else None,
         "account_id": account.get("id") if account else None,
         "changes": changes,
+        "facts": {"community": community, "account": account},
     }
     proposal_id = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -175,6 +213,7 @@ def _proposal(
     )
     return {
         "id": proposal_id,
+        "matcher_version": MATCHER_VERSION,
         "type": proposal_type,
         "status": "pending",
         "confidence": round(confidence, 4),
@@ -193,6 +232,7 @@ def _proposal(
 
 def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[dict]:
     """Build conservative, evidence-backed proposals without writing CRM records."""
+    raw_accounts = [normalize_account_record(a) for a in raw_accounts]
     accounts_by_id = {
         str(account["id"]): account for account in raw_accounts if account.get("id") is not None
     }
@@ -204,13 +244,7 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
     snapshots = {
         str(account["id"]): snapshot_account(account, accounts_by_id) for account in accounts
     }
-    parent_candidates = [
-        account
-        for account in accounts
-        if not account.get("parent_id")
-        and normalize_name(account.get("name")).startswith("bellhaven senior living")
-    ]
-    expected_parent = parent_candidates[0] if len(parent_candidates) == 1 else None
+    expected_parent = identify_parent(accounts)
     expected_parent_id = str(expected_parent["id"]) if expected_parent else None
     proposals: list[dict] = []
     matched_account_ids: set[str] = set()
@@ -219,6 +253,12 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
     for community in communities:
         candidates = []
         for account in accounts:
+            successor = accounts_by_id.get(str(account.get("chow_current_account") or ""))
+            survivor = accounts_by_id.get(str(account.get("duplicate_of_account") or ""))
+            if successor and str(successor.get("parent_id")) == expected_parent_id and score_account(community, successor)[0] >= .78:
+                continue
+            if survivor and score_account(community, survivor)[0] >= .78:
+                continue
             if expected_parent and str(account["id"]) == expected_parent_id:
                 continue
             confidence, evidence = score_account(community, account)
@@ -226,12 +266,19 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
         candidates.sort(key=lambda item: item[0], reverse=True)
 
         strong = [item for item in candidates if item[0] >= 0.78]
+        if len(strong) > 1 and len({(normalize_address(a.get("street")), normalize_name(a.get("city")), normalize_name(a.get("state"))) for _, a, _ in strong}) > 1:
+            confidence, account, evidence = candidates[0]
+            proposals.append(_proposal("ambiguous_match", f"Investigate {community['name']}",
+                "Several candidates have conflicting physical locations.", community,
+                snapshots[str(account["id"])], [], evidence + [f"Candidate {a['id']}: {a['name']} ({c:.0%})" for c, a, _ in candidates[:5]], confidence, True))
+            matched_account_ids.update(str(a["id"]) for _, a, _ in strong)
+            continue
         if len(strong) > 1:
             strong.sort(
                 key=lambda item: (
                     item[1].get("status") == "Active",
-                    _number(item[1].get("lifetime_revenue")),
                     item[0],
+                    str(item[1]["id"]),
                 ),
                 reverse=True,
             )
@@ -299,7 +346,22 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
                         confidence,
                     )
                 )
+            if normalize_name(snapshot["name"]) != normalize_name(community["name"]):
+                proposals.append(_proposal("name_update", f"Correct name for {community['name']}",
+                    "Physical location corroborates the website name.", community, snapshot,
+                    [{"field": "name", "before": snapshot["name"], "after": community["name"]}], evidence, confidence))
+            if not expected_parent_id:
+                proposals.append(_proposal("ambiguous_match", f"Investigate parent for {community['name']}",
+                    "No unique corporate parent can be established; no ownership write is allowed.", community, snapshot, [], evidence, confidence, True))
             if expected_parent_id and snapshot["parent_id"] != expected_parent_id:
+                financial_warning = None
+                try:
+                    chow = requires_successor_account(snapshot)
+                    action = ("Create a successor under the correct parent and link the original; preserve its original parent and billing history."
+                              if chow else "Re-parent the existing facility directly; at least one verified financial balance is zero.")
+                except ValueError as exc:
+                    financial_warning = str(exc)
+                    action = "Blocked ownership correction: investigate missing or invalid financial data before approval."
                 parent_change = [
                     {
                         "field": "parent_id",
@@ -311,15 +373,18 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
                     _proposal(
                         "parent_change",
                         f"Correct the parent for {community['name']}",
-                        f"Move this location under {expected_parent.get('name')}.",
+                        action,
                         community,
                         snapshot,
                         parent_change,
                         evidence
                         + [
+                            action,
+                            financial_warning or "Both financial values were available for the CHOW decision.",
                             f"The Bellhaven parent account was identified as {expected_parent.get('name')} ({expected_parent_id})."
                         ],
                         confidence,
+                        manual_review=financial_warning is not None,
                     )
                 )
             continue
@@ -342,7 +407,7 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
                             "after": "Needs Review",
                         }
                     ],
-                    evidence or ["No reliable matching evidence was found."],
+                    evidence + [f"Candidate {a['id']}: {a['name']} ({c:.0%})" for c, a, _ in candidates[:5]],
                     confidence,
                     manual_review=True,
                 )
@@ -385,6 +450,8 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
             if (
                 account_id == expected_parent_id
                 or snapshot["parent_id"] != expected_parent_id
+                or snapshot["chow_current_account"]
+                or snapshot["duplicate_of_account"]
                 or account_id in matched_account_ids
                 or account_id in duplicate_account_ids
             ):
@@ -398,7 +465,7 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
                     "This CRM child account did not match any location found on the Bellhaven website.",
                     None,
                     snapshot,
-                    [{"field": "status", "before": snapshot["status"], "after": "Inactive"}],
+                    [{"field": "status", "before": snapshot["status"], "after": "Needs Review"}],
                     [
                         f"Account is a child of the identified Bellhaven parent ({expected_parent_id}).",
                         "No community with a strong name-and-location match was found across all scraped directory pages.",

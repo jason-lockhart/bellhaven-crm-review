@@ -1,24 +1,31 @@
-# Example only: this file is outside .github/workflows and is not scheduled.
-# Copy it to .github/workflows/daily-review.yml to enable a read-only daily scan.
+# INERT EXAMPLE: outside .github/workflows. Requires a persistent private runner.
 name: Bellhaven daily read-only review
-
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 13 * * *"
-
+permissions:
+  contents: read
+concurrency:
+  group: bellhaven-persistent-review
+  cancel-in-progress: false
 jobs:
   stage-proposals:
-    runs-on: ubuntu-latest
+    # Must share the durable database with the review dashboard, not an ephemeral runner.
+    runs-on: [self-hosted, bellhaven-review]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install -r artifacts/bellhaven-crm-review/backend/requirements.txt
-      - name: Run read-only reconciliation
+      - name: Read and stage only
         env:
           CLIPBOARD_API_TOKEN: ${{ secrets.CLIPBOARD_API_TOKEN }}
-          BELLHAVEN_DB_PATH: ${{ github.workspace }}/bellhaven-review.sqlite3
-        run: python -m backend.daily_review
+          # Absolute persistent path OUTSIDE the checkout; configure on the private runner.
+          BELLHAVEN_DB_PATH: ${{ vars.BELLHAVEN_DB_PATH }}
         working-directory: artifacts/bellhaven-crm-review
+        run: |
+          test -n "$BELLHAVEN_DB_PATH"
+          case "$BELLHAVEN_DB_PATH" in /*) ;; *) exit 1 ;; esac
+          python -m backend.daily_review

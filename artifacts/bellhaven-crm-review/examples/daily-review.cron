@@ -1,0 +1,4 @@
+# Persistent machine example; replace paths. Same DB and credentials as dashboard.
+# /srv/bellhaven/review.env is private (chmod 600), never tracked by Git.
+# Replit free previews sleep: this is a configuration example, not a promise of daily execution there.
+0 13 * * * cd /srv/bellhaven/artifacts/bellhaven-crm-review && set -a && . /srv/bellhaven/review.env && set +a && /srv/bellhaven/venv/bin/python -m backend.daily_review >> /srv/bellhaven/daily.log 2>&1
