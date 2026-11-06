@@ -98,7 +98,9 @@ function Dashboard() {
   const summary = useGetBellhavenReviewSummary();
   const proposals = useListBellhavenProposals({ status: status === 'all' ? undefined : status as 'pending'|'approved'|'rejected', search: submittedSearch || undefined, page: 1, page_size: 50 });
   const decision = useDecideBellhavenProposal();
-  const run = useRunBellhavenReconciliation();
+  const run = useRunBellhavenReconciliation({
+    request: { headers: { 'Content-Type': 'application/json' }, body: '{}' },
+  });
   const [reviewerNotes, setReviewerNotes] = useState('');
   const [decisionMessage, setDecisionMessage] = useState('');
   const refresh = () => { void qc.invalidateQueries({ queryKey: getGetBellhavenReviewSummaryQueryKey() }); void qc.invalidateQueries({ queryKey: getListBellhavenProposalsQueryKey() }); void qc.invalidateQueries({ queryKey: getGetBellhavenReviewHealthQueryKey() }); };
