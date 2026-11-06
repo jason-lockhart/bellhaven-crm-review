@@ -1,0 +1,42 @@
+kind = "web"
+previewPath = "/"
+title = "Bellhaven CRM Review"
+description = "A cautious CRM review tool that compares Bellhaven Senior Living communities with CRM accounts and keeps every change under explicit human approval."
+version = "1.0.0"
+id = "artifacts/bellhaven-crm-review"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19680
+
+[services.development]
+run = "pnpm --filter @workspace/bellhaven-crm-review run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/bellhaven-crm-review", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/bellhaven-crm-review/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19680"
+BASE_PATH = "/"
+
+[[services]]
+name = "Bellhaven Flask API"
+paths = ["/api/bellhaven"]
+localPort = 8000
+
+[services.development]
+run = "python backend/app.py"
+
+[services.production.run]
+args = ["python", "artifacts/bellhaven-crm-review/backend/app.py"]
+
+[services.production.run.env]
+PORT = "8000"

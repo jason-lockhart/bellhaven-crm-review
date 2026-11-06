@@ -53,3 +53,9 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+.pythonlibs/
+__pycache__/
+*.py[cod]
+artifacts/bellhaven-crm-review/backend/data/*.sqlite3
+artifacts/bellhaven-crm-review/backend/data/*.sqlite3-shm
+artifacts/bellhaven-crm-review/backend/data/*.sqlite3-wal

@@ -1,0 +1,13 @@
+[project]
+name = "bellhaven-crm-review-runtime"
+version = "0.1.0"
+description = "Runtime dependencies for the Bellhaven CRM review service"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "flask>=3.1.3",
+    "requests>=2.34.2",
+]
+
+[tool.uv]
+package = false

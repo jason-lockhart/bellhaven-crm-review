@@ -1,44 +1,49 @@
-# [Project name]
+# Bellhaven CRM Review
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A review dashboard for comparing Bellhaven Senior Living communities with CRM accounts. Website and CRM data are reconciled into evidence-backed proposals; CRM changes require an explicit reviewer decision.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- Start the **Bellhaven CRM Review** web and Flask API workflows from the Replit workspace.
 - `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
+- `cd artifacts/bellhaven-crm-review && python -m unittest discover -s backend/tests -v` — run scraper, matching, persistence, and approval-rule tests
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required secret: `CLIPBOARD_API_TOKEN` — stored in Replit Secrets and read only by Flask
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- React + Vite dashboard; Flask API service
+- Requests + BeautifulSoup for website scraping and CRM API reads
+- SQLite for scraped locations, proposal decisions, and CRM write progress
+- pnpm workspaces, TypeScript 5.9, Orval-generated review API hooks
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/bellhaven-crm-review/src/` — dashboard and theme
+- `artifacts/bellhaven-crm-review/backend/` — scraper, matcher, CRM client, Flask routes, SQLite store, and tests
+- `artifacts/bellhaven-crm-review/README.md` — setup, API assumptions, matching rules, and schedule example
+- `lib/api-spec/openapi.yaml` — review API contract; generated TypeScript hooks live in `lib/api-client-react/`
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The Flask service is routed at `/api/bellhaven`, which is more specific than the shared API service's `/api` path.
+- Reconciliation runs only scrape and read data; each CRM write is triggered by an explicit approval.
+- Proposal IDs are deterministic and SQLite stores decisions so reruns preserve completed reviews.
+- Parent changes preserve accounts with both positive lifetime revenue and outstanding A/R by creating a successor and linking `chow_current_account`.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+The dashboard reviews source communities, proposed CRM updates, confidence, evidence, and prior decisions. The pipeline also flags duplicate, stale, unmatched, and ambiguous records without deleting accounts.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Keep the review interface usable from an iPad browser.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Add `CLIPBOARD_API_TOKEN` through Replit Secrets before reading CRM accounts.
+- The published CRM OpenAPI document leaves account request and response schemas blank; verify live records before changing field mappings.
+- Authentication is not part of the current assessment scope. Keep this project private; do not publish until reviewer access is protected.
 
 ## Pointers
 
