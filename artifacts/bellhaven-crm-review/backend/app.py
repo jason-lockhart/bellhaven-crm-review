@@ -117,6 +117,10 @@ def _apply_approved_proposal(proposal: dict) -> str | None:
             raise CRMError(str(exc)) from None
         if needs_successor != previous_rule or any(matching.parse_financial_value(current.get(f)) != matching.parse_financial_value(snapshot.get(f)) for f in ("lifetime_revenue", "outstanding_ar")):
             raise CRMError("Financial safeguards changed since review; reconcile again.")
+        if current.get("parent_id") == parent_id:
+            # Another reviewer may already have corrected ownership since staging.
+            _verify(client, account_id, {"parent_id": parent_id})
+            return account_id
         # Existing linkage is authoritative, provided it really identifies this facility.
         linked_id = current.get("chow_current_account")
         if linked_id:
@@ -163,11 +167,6 @@ def _apply_approved_proposal(proposal: dict) -> str | None:
         survivor = client.get_account(survivor_id)
         if survivor_id == account_id or matching.score_account(proposal["community"], survivor)[0] < .78:
             raise CRMError("Duplicate survivor is not a verified facility match.")
-        existing_notes = str(current.get("notes") or "")
-        marker = _write_marker(proposal["id"])
-        updates["notes"] = existing_notes if marker in existing_notes else (
-            existing_notes + "\n" + marker + f"; duplicate of {survivor_id}; billing history preserved."
-        ).strip()
     if any(current.get(k) != v for k, v in updates.items()):
         client.update_account(account_id, updates)
     _verify(client, account_id, updates)

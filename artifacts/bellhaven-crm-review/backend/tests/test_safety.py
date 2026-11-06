@@ -396,3 +396,10 @@ class AdditionalRegressionTests(DatabaseTest):
         result=matching.build_proposals([], [PARENT,dict(ACCOUNT,parent_id='parent')])
         self.assertEqual(result[0]['type'],'stale_account')
         self.assertEqual(result[0]['changes'][0]['after'],'Needs Review')
+
+
+    def test_already_corrected_parent_never_creates_unneeded_successor(self):
+        p=self.proposal();fake=FakeCRM(dict(ACCOUNT,parent_id='parent'))
+        self.assertEqual(self.apply(fake,p),'facility')
+        self.assertEqual(fake.creates,0)
+        self.assertEqual(fake.updates,[])

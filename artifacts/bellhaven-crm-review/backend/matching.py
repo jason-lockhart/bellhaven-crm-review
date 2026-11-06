@@ -297,6 +297,13 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
                         "before": snapshot["duplicate_of_account"],
                         "after": str(canonical["id"]),
                     },
+                    {
+                        "field": "notes",
+                        "before": snapshot["notes"],
+                        "after": (str(snapshot["notes"] or "") + "\n"
+                                  + f"Duplicate of {canonical['id']}; billing history preserved. "
+                                  + f"Reviewed against {community.get('source_url', '')}.").strip(),
+                    },
                 ]
                 proposals.append(
                     _proposal(

@@ -114,7 +114,7 @@ pnpm --filter @workspace/bellhaven-crm-review typecheck
 PORT=5173 BASE_PATH=/ pnpm --filter @workspace/bellhaven-crm-review build
 ```
 
-Repair validation: **57 backend tests passed, 0 failed**; shared TypeScript references and frontend typechecking passed; production Vite build passed; Flask dashboard, communities, activity and health routes returned HTTP 200 in a local smoke check.
+Repair validation: **58 backend tests passed, 0 failed**; shared TypeScript references and frontend typechecking passed; production Vite build passed; Flask dashboard, communities, activity and health routes returned HTTP 200 in a local smoke check.
 
 Tests use synthetic fixture records, local HTML and a stateful fake CRM; no automated test can call a live CRM mutation. Tests cover the field regression, parent ambiguity, renamed facilities, physical conflicts, duplicate/stale handling, cases A–G, malformed responses, pagination/timeouts, verification failures, partial creation/link retries, durable rejection, atomic claims and CSRF/auth checks. The public read-only scrape was separately verified: **35 communities, Findlay included**. The public OpenAPI confirms GET/POST/PATCH routes but leaves account request/response schemas empty.
 
