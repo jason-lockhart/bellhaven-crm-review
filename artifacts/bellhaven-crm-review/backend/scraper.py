@@ -118,7 +118,7 @@ def scrape_communities(
     client = session or requests.Session()
     client.headers.setdefault("User-Agent", USER_AGENT)
 
-    pending_pages = deque([WEBSITE_ROOT + "/"])
+    pending_pages = deque([WEBSITE_ROOT + "/", COMMUNITIES_URL])
     visited_pages: set[str] = set()
     detail_urls: dict[str, str] = {}
 
@@ -128,6 +128,8 @@ def scrape_communities(
         if page_url in visited_pages:
             continue
         visited_pages.add(page_url)
+        if len(visited_pages) > 100:
+            raise ScrapeError("Directory pagination exceeded its safety limit.")
 
         try:
             response = client.get(page_url, timeout=timeout)

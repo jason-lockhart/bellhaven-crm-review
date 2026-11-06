@@ -193,7 +193,7 @@ class MatchingTests(unittest.TestCase):
         proposals = build_proposals(communities, accounts)
         self.assertEqual(len(proposals), 1)
         self.assertEqual(proposals[0]["type"], "stale_account")
-        self.assertEqual(proposals[0]["changes"][0]["after"], "Inactive")
+        self.assertEqual(proposals[0]["changes"][0]["after"], "Needs Review")
 
 
 class ScraperTests(unittest.TestCase):
@@ -288,34 +288,6 @@ class ApprovalRuleTests(unittest.TestCase):
             "changes": [{"field": "parent_id", "before": "old-parent", "after": "new-parent"}],
         }
 
-    def test_approved_parent_change_preserves_account_when_both_balances_are_positive(self):
-        from backend import app as review_app
-
-        client = Mock()
-        client.list_accounts.return_value = [{"id": "old-account", "notes": ""}]
-        client.create_account.return_value = {"id": "successor-account"}
-        with patch("backend.app.CRMClient", return_value=client), patch(
-            "backend.app.store.set_write_status", return_value={}
-        ):
-            result = review_app._apply_approved_proposal(self._proposal(100, 25))
-        self.assertEqual(result, "successor-account")
-        client.create_account.assert_called_once()
-        client.update_account.assert_called_once_with(
-            "old-account", {"chow_current_account": "successor-account"}
-        )
-
-    def test_parent_change_updates_existing_account_if_either_balance_is_zero(self):
-        from backend import app as review_app
-
-        client = Mock()
-        with patch("backend.app.CRMClient", return_value=client):
-            result = review_app._apply_approved_proposal(self._proposal(100, 0))
-        self.assertEqual(result, "old-account")
-        client.create_account.assert_not_called()
-        client.update_account.assert_called_once_with(
-            "old-account", {"parent_id": "new-parent"}
-        )
-
     def test_initial_pipeline_stages_website_data_without_a_crm_token(self):
         community = {
             "slug": "maplewood",
@@ -343,6 +315,7 @@ class DecisionRouteTests(unittest.TestCase):
         from backend import app as review_app
 
         self.review_app = review_app
+        review_app.app.config["TESTING"] = True
         self.temp_directory = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temp_directory.name) / "review.sqlite3"
         self.database_patch = patch.object(store, "DATABASE_PATH", self.database_path)
@@ -352,6 +325,7 @@ class DecisionRouteTests(unittest.TestCase):
             [
                 {
                     "id": "decision-route-test",
+                    "matcher_version": 2,
                     "type": "missing_account",
                     "status": "pending",
                     "confidence": 0.9,

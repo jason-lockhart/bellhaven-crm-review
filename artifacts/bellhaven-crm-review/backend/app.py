@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-import logging
+import secrets
+from urllib.parse import urlparse
 from pathlib import Path
 import sys
 
@@ -9,14 +10,14 @@ from flask import Flask, jsonify, request
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from backend import crm_client, matching, pipeline, store
+    from backend import crm_client, matching, pipeline, store, scraper
     from backend.crm_client import CRMClient, CRMError
 else:
-    from . import crm_client, matching, pipeline, store
+    from . import crm_client, matching, pipeline, store, scraper
     from .crm_client import CRMClient, CRMError
 
 API_PREFIX = "/api/bellhaven/review"
-app = Flask(__name__)
+app = Flask(__name__, static_folder="../dist/public", static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024
 store.initialize()
 
@@ -35,14 +36,6 @@ def _account_index(client: CRMClient) -> dict[str, dict]:
 
 def _write_marker(proposal_id: str) -> str:
     return f"Bellhaven CRM Review proposal: {proposal_id}"
-
-
-def _find_created_account(accounts: dict[str, dict], proposal_id: str) -> dict | None:
-    marker = _write_marker(proposal_id)
-    for account in accounts.values():
-        if marker in str(account.get("notes") or ""):
-            return account
-    return None
 
 
 def _create_payload(proposal: dict) -> dict:
@@ -82,44 +75,136 @@ def _create_payload(proposal: dict) -> dict:
     }
 
 
+def _verify(client: CRMClient, account_id: str, fields: dict) -> dict:
+    current = client.get_account(account_id)
+    for field, value in fields.items():
+        if current.get(field) != value:
+            raise CRMError(f"CRM verification failed for field {field}; investigate before retrying.")
+    return current
+
+
 def _apply_approved_proposal(proposal: dict) -> str | None:
+    if proposal.get("matcher_version") != matching.MATCHER_VERSION:
+        raise CRMError("Legacy proposal must be reconciled again before approval.")
+    if proposal["type"] == "ambiguous_match":
+        raise CRMError("Investigate the candidates and reconcile again; ambiguous matches cannot write.")
     client = CRMClient()
-    account = proposal.get("account") or {}
-    proposal_type = proposal["type"]
-    account_id = str(account.get("id") or "")
-
-    needs_successor = proposal_type == "parent_change" and matching.requires_successor_account(account)
-
-    if proposal_type == "missing_account" or needs_successor:
-        accounts = _account_index(client)
-        created = _find_created_account(accounts, proposal["id"])
+    snapshot = proposal.get("account") or {}
+    account_id = str(snapshot.get("id") or "")
+    current = client.get_account(account_id) if account_id else None
+    updates = {c["field"]: c["after"] for c in proposal.get("changes", [])}
+    parent_id = updates.get("parent_id")
+    accounts = _account_index(client)
+    if proposal["type"] in {"parent_change", "missing_account"}:
+        parent = matching.identify_parent(list(accounts.values()))
+        if not parent or str(parent["id"]) != str(parent_id):
+            raise CRMError("The approved corporate parent is no longer uniquely established.")
+    if current:
+        for field in ("name", "street", "city", "state", "zip"):
+            approved_after = updates.get(field, snapshot.get(field))
+            if current.get(field, "") not in (snapshot.get(field, ""), approved_after):
+                raise CRMError("Facility identity changed since review; reconcile again.")
+        for change in proposal.get("changes", []):
+            field = change["field"]
+            if current.get(field) not in (change.get("before"), change.get("after")):
+                raise CRMError("CRM fields changed since review; reconcile again.")
+    needs_successor = False
+    if proposal["type"] == "parent_change":
+        try:
+            needs_successor = matching.requires_successor_account(current)
+            previous_rule = matching.requires_successor_account(snapshot)
+        except ValueError as exc:
+            raise CRMError(str(exc)) from None
+        if needs_successor != previous_rule or any(matching.parse_financial_value(current.get(f)) != matching.parse_financial_value(snapshot.get(f)) for f in ("lifetime_revenue", "outstanding_ar")):
+            raise CRMError("Financial safeguards changed since review; reconcile again.")
+        if current.get("parent_id") == parent_id:
+            # Another reviewer may already have corrected ownership since staging.
+            _verify(client, account_id, {"parent_id": parent_id})
+            return account_id
+        # Existing linkage is authoritative, provided it really identifies this facility.
+        linked_id = current.get("chow_current_account")
+        if linked_id:
+            payload = _create_payload(proposal)
+            _verify(client, str(linked_id), {k: v for k, v in payload.items() if k in {"parent_id", "street", "city", "state", "zip"}})
+            if str(linked_id) == account_id:
+                raise CRMError("Invalid self-referencing CHOW linkage.")
+            return str(linked_id)
+    if proposal["type"] == "missing_account" or needs_successor:
+        payload = _create_payload(proposal)
+        matches = [a for a in accounts.values() if _write_marker(proposal["id"]) in str(a.get("notes") or "")]
+        if len(matches) > 1:
+            raise CRMError("Multiple creation markers found; investigate manually.")
+        created = matches[0] if matches else None
+        known_id = proposal.get("crm_result_account_id")
+        if created is None and known_id:
+            created = client.get_account(str(known_id))
         if created is None:
-            created = client.create_account(_create_payload(proposal))
-            result_id = str(created["id"])
-            store.set_write_status(proposal["id"], "created", result_account_id=result_id)
-        else:
-            result_id = str(created["id"])
-
-        if proposal_type == "parent_change":
-            old_id = str(account.get("id") or "")
-            if not old_id:
-                raise CRMError("The original CRM account identifier is missing.")
-            if str(account.get("chow_current_account") or "") != result_id:
-                client.update_account(old_id, {"chow_current_account": result_id})
+            # Never create after a timed-out POST with an unknown result.
+            if proposal.get("crm_write_error", "") and "unknown" in proposal["crm_write_error"]:
+                raise CRMError("Creation outcome unknown; inspect the CRM before retrying.")
+            if proposal["type"] == "missing_account" and any(matching.score_account(proposal["community"], a)[0] >= .48 for a in accounts.values() if str(a["id"]) != str(parent_id)):
+                raise CRMError("A possible facility now exists; reconcile before creating.")
+            store.set_write_status(proposal["id"], "applying", "Creation outcome unknown until independently verified.")
+            try:
+                created = client.create_account(payload)
+            except CRMError:
+                raise CRMError("Creation outcome unknown; inspect the CRM and retry only after locating its marker.") from None
+            store.set_write_status(proposal["id"], "applying", result_account_id=str(created["id"]))
+        result_id = str(created["id"])
+        _verify(client, result_id, payload)
+        if needs_successor:
+            # The original parent must remain unchanged throughout CHOW.
+            original = client.get_account(account_id)
+            if original.get("parent_id") != current.get("parent_id") or original.get("chow_current_account") not in (None, "", result_id):
+                raise CRMError("Original account changed during CHOW; successor preserved for investigation.")
+            client.update_account(account_id, {"chow_current_account": result_id})
+            _verify(client, account_id, {"chow_current_account": result_id, "parent_id": current.get("parent_id")})
         return result_id
-
-    if not account_id:
-        raise CRMError("The approved proposal does not include a CRM account identifier.")
-
-    updates = {
-        str(change["field"]): change["after"]
-        for change in proposal.get("changes", [])
-        if change.get("field") and change.get("field") != "account"
-    }
-    if not updates:
-        raise CRMError("This proposal has no supported CRM field changes.")
-    client.update_account(account_id, updates)
+    if not current or not updates:
+        raise CRMError("No verified account or approved field changes.")
+    if proposal["type"] == "duplicate_account":
+        survivor_id = str(updates["duplicate_of_account"])
+        survivor = client.get_account(survivor_id)
+        if survivor_id == account_id or matching.score_account(proposal["community"], survivor)[0] < .78:
+            raise CRMError("Duplicate survivor is not a verified facility match.")
+    if any(current.get(k) != v for k, v in updates.items()):
+        client.update_account(account_id, updates)
+    _verify(client, account_id, updates)
     return account_id
+
+
+@app.get("/")
+def dashboard():
+    return app.send_static_file("index.html")
+
+
+@app.errorhandler(404)
+def frontend_route(error):
+    if request.method == "GET" and request.path in {"/activity", "/communities"}:
+        return app.send_static_file("index.html")
+    return _json_error("Not found.", 404)
+
+
+@app.before_request
+def protect_browser_writes():
+    password = os.environ.get("BELLHAVEN_REVIEW_PASSWORD", "")
+    if password:
+        auth = request.authorization
+        if not auth or not secrets.compare_digest(auth.password or "", password):
+            return jsonify({"error": "Reviewer authentication required."}), 401, {"WWW-Authenticate": 'Basic realm="Bellhaven review"'}
+    elif request.method == "POST" and request.path.endswith("/decision") and not app.config.get("TESTING"):
+        return _json_error("Configure BELLHAVEN_REVIEW_PASSWORD before recording decisions.", 503)
+
+    if request.method != "POST":
+        return None
+    # JSON-only + no CORS defeats form CSRF. Cross-origin fetches are refused.
+    if not request.is_json:
+        return _json_error("JSON requests are required.", 415)
+    origin = request.headers.get("Origin")
+    if request.headers.get("Sec-Fetch-Site") == "cross-site" or (origin and urlparse(origin).netloc != request.host):
+        return _json_error("Cross-origin writes are forbidden.", 403)
+    # Keep the dashboard behind Replit's private access controls.
+    return None
 
 
 @app.get(f"{API_PREFIX}/health")
@@ -200,6 +285,10 @@ def decide_proposal(proposal_id: str):
     proposal = store.get_proposal(proposal_id)
     if not proposal:
         return _json_error("Proposal not found.", 404)
+    if decision == "approved" and (proposal.get("matcher_version") != matching.MATCHER_VERSION or proposal["type"] == "ambiguous_match"):
+        return _json_error("This proposal requires investigation and a fresh reconciliation before approval.", 409)
+    if proposal["status"] == "superseded":
+        return _json_error("Proposal was superseded; run reconciliation and review the current evidence.", 409)
     if proposal["status"] in {"approved", "rejected"} and proposal["status"] != decision:
         return _json_error("This proposal already has a different recorded decision.", 409)
     if proposal["status"] == "rejected":
@@ -212,24 +301,18 @@ def decide_proposal(proposal_id: str):
         )
 
     if decision == "rejected":
-        saved = store.set_decision(
-            proposal_id,
-            "rejected",
-            reviewer_notes,
-            write_status="not_applicable",
-        )
+        if not store.record_rejection(proposal_id, reviewer_notes):
+            return _json_error("The proposal changed during this decision. Refresh the review queue.", 409)
+        saved = store.get_proposal(proposal_id)
         return jsonify(
             {"proposal": saved, "message": "Rejection recorded. No CRM data was changed.", "crm_updated": False}
         )
 
-    # Persist the reviewer's decision before attempting an external write.
-    saved = store.set_decision(
-        proposal_id,
-        "approved",
-        reviewer_notes,
-        write_status="waiting_for_token" if not crm_client.token_is_configured() else "applying",
-    )
+    if not store.claim_approval(proposal_id, reviewer_notes):
+        return _json_error("A write is already running or completed. Inspect history before retrying.", 409)
+    saved = store.get_proposal(proposal_id)
     if not crm_client.token_is_configured():
+        saved = store.set_write_status(proposal_id, "waiting_for_token")
         return jsonify(
             {
                 "proposal": saved,

@@ -121,8 +121,7 @@ class CRMClient:
             ]
             if len(lists) == 1:
                 return lists[0]
-            if not lists:
-                return []
+
         raise CRMError(
             "The documented accounts endpoint returned an unrecognized response shape. "
             "The published OpenAPI document does not define its response schema."
@@ -140,7 +139,7 @@ class CRMClient:
                     timeout=25,
                 )
             except requests.RequestException as exc:
-                raise CRMError(f"Could not reach the CRM accounts endpoint: {exc}") from exc
+                raise CRMError("Could not reach the CRM accounts endpoint.") from None
             if not response.ok:
                 raise self._request_error(response)
             try:
@@ -150,6 +149,7 @@ class CRMClient:
             if not raw_batch:
                 break
             batch = [normalize_account_record(row) for row in raw_batch]
+            previous_count = len(seen_ids)
             for row in batch:
                 account_id = row.get("id")
                 if account_id is None:
@@ -157,12 +157,28 @@ class CRMClient:
                 if account_id not in seen_ids:
                     accounts.append(row)
                     seen_ids.add(account_id)
+            if len(seen_ids) == previous_count:
+                raise CRMError("CRM pagination repeated a page; refusing an incomplete scan.")
             if len(batch) < PAGE_SIZE:
                 break
         else:
             raise CRMError(f"CRM pagination exceeded the safety limit of {MAX_PAGES} pages.")
 
         return accounts
+
+    def get_account(self, account_id: str) -> dict:
+        try:
+            response = self.session.get(f"{CRM_API_ROOT}/accounts/{account_id}", timeout=25)
+            if not response.ok:
+                raise self._request_error(response)
+            account = _account_from_response(response.json())
+        except requests.RequestException:
+            raise CRMError("Could not fetch the current CRM account.") from None
+        except ValueError:
+            raise CRMError("CRM account endpoint returned invalid JSON.") from None
+        if account.get("id") != str(account_id):
+            raise CRMError("CRM account identifier verification failed.")
+        return account
 
     def create_account(self, payload: dict) -> dict:
         try:
@@ -172,7 +188,7 @@ class CRMClient:
                 timeout=25,
             )
         except requests.RequestException as exc:
-            raise CRMError(f"Could not create the approved CRM account: {exc}") from exc
+            raise CRMError("Could not create the approved CRM account.") from None
         if not response.ok:
             raise self._request_error(response)
         try:
@@ -193,7 +209,7 @@ class CRMClient:
                 timeout=25,
             )
         except requests.RequestException as exc:
-            raise CRMError(f"Could not update the approved CRM account: {exc}") from exc
+            raise CRMError("Could not update the approved CRM account.") from None
         if not response.ok:
             raise self._request_error(response)
         if not response.content:
