@@ -207,10 +207,8 @@ def build_proposals(communities: list[dict], raw_accounts: list[dict]) -> list[d
     parent_candidates = [
         account
         for account in accounts
-        if normalize_name(account.get("name")) in {
-            "bellhaven senior living",
-            "bellhaven",
-        }
+        if not account.get("parent_id")
+        and normalize_name(account.get("name")).startswith("bellhaven senior living")
     ]
     expected_parent = parent_candidates[0] if len(parent_candidates) == 1 else None
     expected_parent_id = str(expected_parent["id"]) if expected_parent else None

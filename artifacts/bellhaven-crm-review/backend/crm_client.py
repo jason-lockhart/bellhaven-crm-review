@@ -8,10 +8,78 @@ import requests
 CRM_API_ROOT = "https://analyst-assessment-production.up.railway.app/api/v1"
 PAGE_SIZE = 50
 MAX_PAGES = 100
+ACCOUNT_FIELD_ALIASES = {
+    "id": ("id", "account_id"),
+    "street": ("street", "billing_street"),
+    "city": ("city", "billing_city"),
+    "state": ("state", "billing_state"),
+    "zip": ("zip", "billing_zip"),
+    "notes": ("notes", "note"),
+}
+API_FIELD_ALIASES = {
+    "street": "billing_street",
+    "city": "billing_city",
+    "state": "billing_state",
+    "zip": "billing_zip",
+    "notes": "note",
+}
+WRITABLE_API_FIELDS = {
+    "name",
+    "billing_street",
+    "billing_city",
+    "billing_state",
+    "billing_zip",
+    "parent_id",
+    "status",
+    "note",
+    "duplicate_of_account",
+    "chow_current_account",
+}
+ACCOUNT_STATUSES = {"Active", "Inactive", "Needs Review"}
 
 
 class CRMError(RuntimeError):
     """A sanitized CRM API failure; never includes request authorization headers."""
+
+
+def normalize_account_record(record: dict) -> dict:
+    """Map the live API's billing/account field names to matcher field names."""
+    normalized = dict(record)
+    for canonical, candidates in ACCOUNT_FIELD_ALIASES.items():
+        if normalized.get(canonical) not in (None, ""):
+            continue
+        for candidate in candidates:
+            value = record.get(candidate)
+            if value not in (None, ""):
+                normalized[canonical] = value
+                break
+    if normalized.get("id") is not None:
+        normalized["id"] = str(normalized["id"])
+    if normalized.get("parent_id") is not None:
+        normalized["parent_id"] = str(normalized["parent_id"])
+    return normalized
+
+
+def _account_from_response(payload: Any) -> dict:
+    if isinstance(payload, dict) and isinstance(payload.get("account"), dict):
+        payload = payload["account"]
+    elif isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        payload = payload["data"]
+    if not isinstance(payload, dict):
+        raise CRMError("The CRM account endpoint returned an unrecognized response.")
+    return normalize_account_record(payload)
+
+
+def _api_account_payload(payload: dict) -> dict:
+    result = {}
+    for field, value in payload.items():
+        api_field = API_FIELD_ALIASES.get(field, field)
+        if api_field not in WRITABLE_API_FIELDS:
+            raise CRMError("The approved change contains an unsupported CRM field.")
+        if api_field == "status" and value not in ACCOUNT_STATUSES:
+            raise CRMError("The approved change contains an unsupported account status.")
+        result[api_field] = value
+    return result
 
 
 def token_is_configured() -> bool:
@@ -76,17 +144,19 @@ class CRMClient:
             if not response.ok:
                 raise self._request_error(response)
             try:
-                batch = self._records_from_response(response.json())
+                raw_batch = self._records_from_response(response.json())
             except ValueError as exc:
                 raise CRMError("The CRM accounts endpoint returned invalid JSON.") from exc
-            if not batch:
+            if not raw_batch:
                 break
+            batch = [normalize_account_record(row) for row in raw_batch]
             for row in batch:
                 account_id = row.get("id")
-                if account_id is None or str(account_id) not in seen_ids:
+                if account_id is None:
+                    raise CRMError("A CRM account record did not include an account identifier.")
+                if account_id not in seen_ids:
                     accounts.append(row)
-                    if account_id is not None:
-                        seen_ids.add(str(account_id))
+                    seen_ids.add(account_id)
             if len(batch) < PAGE_SIZE:
                 break
         else:
@@ -98,7 +168,7 @@ class CRMClient:
         try:
             response = self.session.post(
                 f"{CRM_API_ROOT}/accounts",
-                json=payload,
+                json=_api_account_payload(payload),
                 timeout=25,
             )
         except requests.RequestException as exc:
@@ -106,7 +176,7 @@ class CRMClient:
         if not response.ok:
             raise self._request_error(response)
         try:
-            result = response.json()
+            result = _account_from_response(response.json())
         except ValueError as exc:
             raise CRMError("The CRM create-account endpoint returned invalid JSON.") from exc
         if not isinstance(result, dict) or result.get("id") is None:
@@ -119,7 +189,7 @@ class CRMClient:
         try:
             response = self.session.patch(
                 f"{CRM_API_ROOT}/accounts/{account_id}",
-                json=payload,
+                json=_api_account_payload(payload),
                 timeout=25,
             )
         except requests.RequestException as exc:
@@ -129,7 +199,7 @@ class CRMClient:
         if not response.content:
             return {"id": account_id, **payload}
         try:
-            result = response.json()
+            result = _account_from_response(response.json())
         except ValueError as exc:
             raise CRMError("The CRM update-account endpoint returned invalid JSON.") from exc
         if not isinstance(result, dict):

@@ -10,8 +10,6 @@ Bellhaven CRM Review compares the Senior Living community directory with CRM acc
 4. Run the scan again to compare the directory with CRM accounts.
 5. Review the evidence and approve or reject proposals individually. Rejected proposals do not make CRM requests.
 
-No CRM token is currently included in this project. Without it, the app can verify and store the website scrape but cannot read accounts or apply approvals.
-
 ## Access before publishing
 
 The assessment brief did not specify sign-in, so this build does not include reviewer authentication. Keep the Replit project private. Before publishing it publicly, add reviewer sign-in and protect both the dashboard data and `/api/bellhaven` API routes.
@@ -22,14 +20,15 @@ The assessment brief did not specify sign-in, so this build does not include rev
 - CRM API: `https://analyst-assessment-production.up.railway.app/api/v1`
 - The CRM bearer token is loaded from the `CLIPBOARD_API_TOKEN` environment variable.
 - The live Swagger/OpenAPI page is `/api/docs`; its OpenAPI JSON is `/api/openapi.json`.
-- The OpenAPI file documents `GET /api/v1/accounts` pagination and the account create/update routes, but it leaves successful account response and request-body schemas empty. The adapter therefore expects the assessment's named fields (`id`, `name`, `street`, `city`, `state`, `zip`, `parent_id`, `lifetime_revenue`, `outstanding_ar`, `chow_current_account`, `status`, `notes`, and `duplicate_of_account`) as specified by the assessment and the documented query filters. It stops with a clear error when the list response shape cannot be safely read. Verify actual account samples before using approved writes against a different CRM.
+- The live account list exposes `account_id`, `billing_street`, `billing_city`, `billing_state`, `billing_zip`, and singular `note`; the adapter maps these to internal matcher fields. Other assessment fields include `parent_id`, `lifetime_revenue`, `outstanding_ar`, `chow_current_account`, `status`, and `duplicate_of_account`.
+- The OpenAPI document leaves successful account response and request-body schemas empty. Reads were validated against the live account list, but write payloads have not been tested with a real approval. The adapter maps internal address and note fields back to the live API names, and only sends writes after explicit approval.
 
 ## Matching logic
 
 - Follows the homepage's community links, every directory pagination link, and each discovered location's detail page.
 - Compares normalized names first, then uses street address, city, state, and ZIP as supporting evidence.
 - Uses a conservative confidence threshold. Weak or near-tied candidates are marked for manual review; they are not silently auto-matched.
-- Proposes address corrections and parent changes only when the account match is strong and a unique Bellhaven parent account is present.
+- Proposes address corrections and parent changes only when the account match is strong and a unique top-level “Bellhaven Senior Living” parent account is present.
 - Flags unmatched CRM child accounts under the identified parent as inactive candidates; it never deletes accounts.
 - For duplicate candidates, the proposed canonical record is selected by active status, lifetime revenue, and confidence, with evidence attached for review.
 

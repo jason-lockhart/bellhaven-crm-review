@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from backend import pipeline, store
+from backend.crm_client import _api_account_payload, normalize_account_record
 from backend.matching import (
     build_proposals,
     normalize_address,
@@ -14,6 +15,54 @@ from backend.matching import (
     score_account,
 )
 from backend.scraper import parse_community_detail, parse_listing_page
+
+
+class CRMFieldAdapterTests(unittest.TestCase):
+    def test_maps_live_account_fields_to_matcher_fields(self):
+        account = normalize_account_record(
+            {
+                "account_id": "crm-123",
+                "name": "Bellhaven of Maplewood",
+                "billing_street": "210 Orchard Lane",
+                "billing_city": "Maplewood",
+                "billing_state": "OH",
+                "billing_zip": "44280",
+                "note": "Reviewed last quarter.",
+            }
+        )
+        self.assertEqual(account["id"], "crm-123")
+        self.assertEqual(account["street"], "210 Orchard Lane")
+        self.assertEqual(account["city"], "Maplewood")
+        self.assertEqual(account["state"], "OH")
+        self.assertEqual(account["zip"], "44280")
+        self.assertEqual(account["notes"], "Reviewed last quarter.")
+
+    def test_maps_approved_fields_back_to_live_api_names(self):
+        payload = _api_account_payload(
+            {
+                "name": "Bellhaven of Maplewood",
+                "street": "210 Orchard Lane",
+                "city": "Maplewood",
+                "state": "OH",
+                "zip": "44280",
+                "parent_id": "parent-123",
+                "status": "Active",
+                "notes": "Created after approval.",
+            }
+        )
+        self.assertEqual(
+            payload,
+            {
+                "name": "Bellhaven of Maplewood",
+                "billing_street": "210 Orchard Lane",
+                "billing_city": "Maplewood",
+                "billing_state": "OH",
+                "billing_zip": "44280",
+                "parent_id": "parent-123",
+                "status": "Active",
+                "note": "Created after approval.",
+            },
+        )
 
 
 class MatchingTests(unittest.TestCase):
@@ -98,6 +147,31 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(parent_change["changes"][0]["after"], "parent")
         # The financial rule is enforced by the explicit approval/apply path,
         # not by the read-only matching stage.
+
+    def test_recognizes_live_parent_account_label(self):
+        community = {
+            "slug": "maplewood",
+            "name": "Bellhaven of Maplewood",
+            "address": "210 Orchard Lane",
+            "city": "Maplewood",
+            "state": "OH",
+            "zip": "44280",
+        }
+        parent = {"id": "parent-123", "name": "Bellhaven Senior Living (Parent Account)"}
+        location = {
+            "id": "location-123",
+            "name": community["name"],
+            "street": community["address"],
+            "city": community["city"],
+            "state": community["state"],
+            "zip": community["zip"],
+            "parent_id": "wrong-parent",
+            "lifetime_revenue": 0,
+            "outstanding_ar": 0,
+        }
+        proposals = build_proposals([community], [parent, location])
+        self.assertEqual([proposal["type"] for proposal in proposals], ["parent_change"])
+        self.assertEqual(proposals[0]["changes"][0]["after"], "parent-123")
 
     def test_successor_rule_requires_both_positive_balances(self):
         self.assertTrue(
